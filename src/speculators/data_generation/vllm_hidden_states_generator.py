@@ -1,7 +1,8 @@
 """Extract hidden states from intermediate layers during prefill using vLLM."""
 
 import warnings
-from typing import Literal
+from collections.abc import Sequence
+from typing import Any, Literal
 
 import torch
 from transformers import AutoConfig, AutoTokenizer
@@ -15,7 +16,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.utils import get_hash_fn_by_name
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_groups_uniform_spec,
     get_kv_cache_config_from_groups,
@@ -165,8 +166,9 @@ class VllmHiddenStatesGenerator:
         self.scheduler = Scheduler(
             vllm_config=self.vllm_config,
             kv_cache_config=kv_cache_config,
+            kv_cache_specs=kv_cache_spec,
             structured_output_manager=structured_output_manager,
-            block_size=VLLM_BLOCK_SIZE,
+            # block_size=VLLM_BLOCK_SIZE,
         )
 
         log.info("Initializing KV cache on all workers...")
@@ -239,35 +241,73 @@ class VllmHiddenStatesGenerator:
             args=(self.layer_ids,),
         )
 
-    def generate(self, token_ids: list[list[int]] | torch.Tensor) -> list[dict]:  # noqa: PLR0912, PLR0915
+    def _normalize_requests(
+        self,
+        token_ids: list[list[int]] | list[dict[str, Any]] | torch.Tensor,
+    ) -> list[dict[str, Any]]:
+        if isinstance(token_ids, torch.Tensor):
+            if token_ids.ndim == 1:
+                raw_requests: Sequence[Any] = [token_ids.tolist()]
+            else:
+                raw_requests = token_ids.tolist()
+        else:
+            if not token_ids:
+                raise ValueError("token_ids cannot be empty")
+            raw_requests = token_ids
+
+        normalized_requests = []
+        for item in raw_requests:
+            if isinstance(item, dict):
+                prompt_token_ids = item.get("prompt_token_ids")
+                if prompt_token_ids is None:
+                    raise ValueError("request dict must contain prompt_token_ids")
+                mm_features = item.get("mm_features")
+            else:
+                prompt_token_ids = item
+                mm_features = None
+
+            ids_list = (
+                prompt_token_ids.tolist()
+                if isinstance(prompt_token_ids, torch.Tensor)
+                else list(prompt_token_ids)
+            )
+            normalized_requests.append(
+                {
+                    "prompt_token_ids": ids_list,
+                    "mm_features": mm_features,
+                }
+            )
+        return normalized_requests
+
+    def generate(
+        self,
+        token_ids: list[list[int]] | list[dict[str, Any]] | torch.Tensor,
+    ) -> list[dict]:  # noqa: PLR0912, PLR0915
         """Extract hidden states from prefill phase only.
 
         Args:
-            token_ids: Batch of token ID sequences as list[list[int]] or Tensor
+            token_ids: Batch of token ID sequences as list[list[int]] or Tensor,
+                or request dicts containing prompt_token_ids and optional
+                mm_features
 
         Returns:
             List of dicts with keys: input_ids, hidden_states, loss_mask
         """
-        if isinstance(token_ids, torch.Tensor):
-            input_ids_list = token_ids.tolist()
-        else:
-            if not token_ids:
-                raise ValueError("token_ids cannot be empty")
-            input_ids_list = token_ids
+        normalized_requests = self._normalize_requests(token_ids)
 
-        log.debug(f"Generating hidden states for {len(input_ids_list)} sequences")
+        log.debug(f"Generating hidden states for {len(normalized_requests)} sequences")
         # Account for max_tokens=1 in sampling params
         # (vLLM enforces: len(prompt) + max_tokens <= max_model_len)
         max_len = self.vllm_config.model_config.max_model_len - MAX_DECODE_TOKENS
-        input_ids_list = [ids[:max_len] for ids in input_ids_list]
+        for request in normalized_requests:
+            request["prompt_token_ids"] = request["prompt_token_ids"][:max_len]
 
         # Track request IDs and prompt lengths for proper token attribution
         request_id_to_idx = {}
         request_id_to_prompt_len = {}
 
-        for i, ids in enumerate(input_ids_list):
-            # Ensure ids is a list (not tensor) for vLLM Request
-            ids_list = ids.tolist() if isinstance(ids, torch.Tensor) else ids
+        for i, request_data in enumerate(normalized_requests):
+            ids_list = request_data["prompt_token_ids"]
             req_id = f"req_{self._request_counter}_{i}"
             request_id_to_idx[req_id] = i
             request_id_to_prompt_len[req_id] = len(ids_list)
@@ -275,6 +315,7 @@ class VllmHiddenStatesGenerator:
             req = Request(
                 request_id=req_id,
                 prompt_token_ids=ids_list,
+                mm_features=request_data["mm_features"],
                 sampling_params=SamplingParams(
                     max_tokens=MAX_DECODE_TOKENS, temperature=SAMPLING_TEMPERATURE
                 ),
@@ -331,13 +372,18 @@ class VllmHiddenStatesGenerator:
         )
 
         # Get captured states organized by request ID
-        request_states_dict = self.executor.collective_rpc(
+        responses = self.executor.collective_rpc(
             "_get_captured_states",
             unique_reply_rank=0,
         )
+        request_states_dict = responses[0] if responses else None
 
-        if not request_states_dict:
-            raise RuntimeError("Failed to capture hidden states from worker")
+        if not isinstance(request_states_dict, dict):
+            raise RuntimeError(
+                "Unexpected _get_captured_states response type: "
+                f"{type(request_states_dict).__name__}; raw responses type="
+                f"{type(responses).__name__}"
+            )
 
         log.debug(f"Captured states for {len(request_states_dict)} requests")
 
@@ -353,7 +399,9 @@ class VllmHiddenStatesGenerator:
                 )
 
             layer_states = [h.clone().cpu() for h in request_states_dict[req_id]]
-            input_ids_tensor = torch.as_tensor(input_ids_list[i], dtype=torch.long)
+            input_ids_tensor = torch.as_tensor(
+                normalized_requests[i]["prompt_token_ids"], dtype=torch.long
+            )
 
             results.append(
                 {

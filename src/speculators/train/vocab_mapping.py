@@ -109,7 +109,7 @@ def get_target_vocab_size(target_vocab_size, target_model_path):
     if has_vocab:
         return target_vocab_size
 
-    config = AutoConfig.from_pretrained(target_model_path)
+    config = AutoConfig.from_pretrained(target_model_path, trust_remote_code=True)
 
     # For multimodal models (Qwen3VL, etc.), extract text_config
     if hasattr(config, "text_config"):

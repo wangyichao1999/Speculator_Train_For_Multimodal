@@ -7,6 +7,11 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2DecoderLayer,
+    Qwen2RMSNorm,
+    Qwen2RotaryEmbedding,
+)
 from transformers.models.qwen3.modeling_qwen3 import (
     Qwen3DecoderLayer,
     Qwen3RMSNorm,
@@ -42,6 +47,12 @@ model_classes: dict[str, ModelComponents] = {
         LlamaDecoderLayer,
         LlamaRMSNorm,
         LlamaRotaryEmbedding,
+    ),
+    "qwen2": ModelComponents(
+        Qwen2DecoderLayer,  # first_layer_class (same as decoder for base models)
+        Qwen2DecoderLayer,
+        Qwen2RMSNorm,
+        Qwen2RotaryEmbedding,
     ),
     "qwen3": ModelComponents(
         Qwen3DecoderLayer,  # first_layer_class (same as decoder for base models)

@@ -449,7 +449,7 @@ class Eagle3SampleFileDataset(BaseEagle3Dataset):
     def _get_raw_data(self, index):
         return standardize_data_v1(
             torch.load(
-                self.data[index], mmap=True, weights_only=True, map_location="cpu"
+                str(self.data[index]), mmap=True, weights_only=True, map_location="cpu"
             )
         )
 

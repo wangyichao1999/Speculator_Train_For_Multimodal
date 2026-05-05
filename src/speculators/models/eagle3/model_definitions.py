@@ -4,6 +4,8 @@ from typing import Any
 import torch
 from transformers import Cache, LlamaConfig, PretrainedConfig
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRMSNorm
+from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer, Qwen2RMSNorm
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3DecoderLayer, Qwen3RMSNorm
 from transformers.processing_utils import Unpack
@@ -122,6 +124,17 @@ class LlamaDecoderEagle3FirstLayer(Eagle3FirstLayerMixin, LlamaDecoderLayer):
         self._patch_eagle3_projections(config, LlamaRMSNorm, norm_before_residual)
 
 
+class Qwen2DecoderEagle3FirstLayer(Eagle3FirstLayerMixin, Qwen2DecoderLayer):
+    def __init__(
+        self,
+        config: Qwen2Config,
+        layer_idx: int,
+        norm_before_residual: bool = False,
+    ):
+        super().__init__(config, layer_idx)
+        self._patch_eagle3_projections(config, Qwen2RMSNorm, norm_before_residual)
+
+
 class Qwen3DecoderEagle3FirstLayer(Eagle3FirstLayerMixin, Qwen3DecoderLayer):
     def __init__(
         self,
@@ -136,6 +149,9 @@ class Qwen3DecoderEagle3FirstLayer(Eagle3FirstLayerMixin, Qwen3DecoderLayer):
 model_classes: dict[str, base_components.ModelComponents] = {
     "llama": base_components.override_components(
         "llama", first_layer_class=LlamaDecoderEagle3FirstLayer
+    ),
+    "qwen2": base_components.override_components(
+        "qwen2", first_layer_class=Qwen2DecoderEagle3FirstLayer
     ),
     "qwen3": base_components.override_components(
         "qwen3", first_layer_class=Qwen3DecoderEagle3FirstLayer

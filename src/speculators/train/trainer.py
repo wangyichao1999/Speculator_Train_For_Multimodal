@@ -30,6 +30,33 @@ metric_logger = logging.getLogger("speculators.metrics")
 warnings.filterwarnings("ignore", category=TqdmExperimentalWarning)
 
 
+def _is_npu_available() -> bool:
+    torch_npu = getattr(torch, "npu", None)
+    return torch_npu is not None and torch_npu.is_available()
+
+
+def clip_grad_norm(parameters, max_norm: float):
+    params = [p for p in parameters if p.grad is not None]
+    if not params:
+        return torch.tensor(0.0)
+
+    if not _is_npu_available():
+        return torch.nn.utils.clip_grad_norm_(params, max_norm)
+
+    total_norm_sq = torch.zeros((), device=params[0].grad.device, dtype=torch.float32)
+    for param in params:
+        grad = param.grad.detach()
+        total_norm_sq += grad.float().pow(2).sum()
+    total_norm = total_norm_sq.sqrt()
+    clip_coef = torch.clamp(
+        torch.tensor(max_norm, device=total_norm.device) / (total_norm + 1e-6),
+        max=1.0,
+    )
+    for param in params:
+        param.grad.detach().mul_(clip_coef.to(param.grad.dtype))
+    return total_norm
+
+
 class TrainerConfig(NamedTuple):
     lr: float
     num_epochs: int
@@ -248,7 +275,7 @@ class Trainer:
 
             self.opt.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            clip_grad_norm(self.model.parameters(), 1.0)
             self.opt.step()
 
             current_lr = self.opt.param_groups[0]["lr"]
