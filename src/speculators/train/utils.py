@@ -30,7 +30,7 @@ def maybe_setup_distributed() -> tuple[int, int, int, bool]:
     if acc is None:
         raise ValueError("No accelerator found")
     backend = torch.distributed.get_default_backend_for_device(acc)
-    dist.init_process_group(backend, device_id=local_rank)
+    dist.init_process_group(backend, device_id=torch.device(f"{acc.type}:{local_rank}"))
 
     rank = dist.get_rank()
 

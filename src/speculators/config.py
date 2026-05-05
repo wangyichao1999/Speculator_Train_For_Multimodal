@@ -19,11 +19,16 @@ Classes:
 """
 
 import os
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 from transformers import PretrainedConfig
+
+try:
+    SPECULATORS_VERSION = version("speculators")
+except PackageNotFoundError:
+    SPECULATORS_VERSION = "0.0.0+local"
 
 from speculators.proposals import TokenProposalConfig
 from speculators.utils import PydanticClassRegistryMixin, ReloadableBaseModel
@@ -236,7 +241,7 @@ class SpeculatorModelConfig(PydanticClassRegistryMixin, PretrainedConfig):
         description="The type of model from the Speculators repo this config is for.",
     )
     speculators_version: str = Field(
-        default=version("speculators"),
+        default=SPECULATORS_VERSION,
         description="Version of the speculators library",
     )
     speculators_config: SpeculatorsConfig = Field(  # type: ignore[assignment]

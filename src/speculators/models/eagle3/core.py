@@ -11,12 +11,25 @@ from speculators.config import SpeculatorsConfig, VerifierConfig
 from speculators.model import SpeculatorModel
 from speculators.models.eagle3 import Eagle3SpeculatorConfig
 from speculators.models.eagle3.attention import (
+    block_mask_to_dense_attention_mask,
     create_combined_mask_mod,
     extend_mask_for_draft_tokens,
 )
 from speculators.models.eagle3.model_definitions import model_classes
 from speculators.proposals.greedy import GreedyTokenProposalConfig
 from speculators.utils.loading import load_model_layers
+
+
+def select_attention_implementation(device: torch.device | None = None) -> str:
+    if device is not None:
+        if device.type == "npu":
+            return "sdpa"
+        return "simple_flex_attention"
+
+    torch_npu = getattr(torch, "npu", None)
+    if torch_npu is not None and torch_npu.is_available():
+        return "sdpa"
+    return "simple_flex_attention"
 
 
 def align_for_step(
@@ -157,6 +170,7 @@ class Eagle3DraftModel(SpeculatorModel):
     config_class: ClassVar[type[Eagle3SpeculatorConfig]] = Eagle3SpeculatorConfig  # type: ignore[misc]
     _keys_to_ignore_on_load_missing: ClassVar[list[str]] = [  # type: ignore[misc,assignment]
         "embed_tokens.weight",
+        "lm_head.weight",
         "verifier_norm.weight",
         "verifier_lm_head.weight",
         "d2t",
@@ -174,7 +188,7 @@ class Eagle3DraftModel(SpeculatorModel):
     def __init__(self, config: Eagle3SpeculatorConfig):
         # Forcibly override config settings
         config.tie_word_embeddings = False
-        config.transformer_layer_config._attn_implementation = "simple_flex_attention"  # noqa: SLF001
+        config.transformer_layer_config._attn_implementation = select_attention_implementation()  # noqa: SLF001
         super().__init__(config=config)
 
         self.hidden_size = config.transformer_layer_config.hidden_size
@@ -306,7 +320,9 @@ class Eagle3DraftModel(SpeculatorModel):
         verifier_config = self.config.speculators_config.verifier
         if verifier_config.name_or_path is None:
             raise ValueError("VerifierConfig `name_or_path` value is required.")
-        verifier_model_config = AutoConfig.from_pretrained(verifier_config.name_or_path)
+        verifier_model_config = AutoConfig.from_pretrained(
+            verifier_config.name_or_path, trust_remote_code=True
+        )
 
         # For multimodal models (Qwen3VL, etc.), extract text_config
         if hasattr(verifier_model_config, "text_config"):
@@ -411,8 +427,8 @@ class Eagle3DraftModel(SpeculatorModel):
         past_key_values = DynamicCache(config=self.config.transformer_layer_config)
 
         combined_mask_mod = create_combined_mask_mod(lengths.to(device), total_seq_len)
-        # Note: Attention mask is stored as a BlockMask object
-        attention_mask = create_block_mask(
+        attn_impl = select_attention_implementation(device)
+        block_attention_mask = create_block_mask(
             combined_mask_mod,
             B=None,
             H=None,
@@ -420,6 +436,12 @@ class Eagle3DraftModel(SpeculatorModel):
             KV_LEN=total_seq_len,
             device=device,
         )
+        if attn_impl == "simple_flex_attention":
+            attention_mask = block_attention_mask
+        else:
+            attention_mask = block_mask_to_dense_attention_mask(
+                block_attention_mask, device=device, dtype=torch.bool
+            )
 
         if self.input_norm is not None:
             hidden_states = self.input_norm(hidden_states)
@@ -476,7 +498,7 @@ class Eagle3DraftModel(SpeculatorModel):
                     **kwargs,
                 )
 
-            logits = self.lm_head(self.norm(hidden_states))
+            logits = self.verifier_lm_head(self.norm(hidden_states))
             # shape: [1, total_seq_len, draft_vocab_size]
 
             if return_loss:
@@ -515,7 +537,13 @@ class Eagle3DraftModel(SpeculatorModel):
                 )
                 # shape: [1, total_seq_len]
 
-            attention_mask = extend_mask_for_draft_tokens(attention_mask)
+            block_attention_mask = extend_mask_for_draft_tokens(block_attention_mask)
+            if attn_impl == "simple_flex_attention":
+                attention_mask = block_attention_mask
+            else:
+                attention_mask = block_mask_to_dense_attention_mask(
+                    block_attention_mask, device=device, dtype=torch.bool
+                )
             position_ids = position_ids + 1
             # shape: [1, total_seq_len]
 

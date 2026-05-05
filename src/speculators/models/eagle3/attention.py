@@ -124,9 +124,9 @@ def extend_mask_for_draft_tokens(block_mask):
 
 
 def block_mask_to_dense_attention_mask(
-    block_mask: BlockMask, device: torch.device, dtype: torch.dtype
+    block_mask: BlockMask, device: torch.device, dtype: torch.dtype = torch.bool
 ):
-    attention_mask = torch.ones(block_mask.shape, device=device, dtype=dtype)
+    attention_mask = torch.zeros(block_mask.shape, device=device, dtype=torch.bool)
 
     for q_idx in range(attention_mask.shape[2]):
         attention_mask[0, 0, q_idx, :] = block_mask.mask_mod(
@@ -135,7 +135,7 @@ def block_mask_to_dense_attention_mask(
             torch.ones(1, device=device, dtype=torch.long) * q_idx,
             torch.arange(attention_mask.shape[3], device=device, dtype=torch.long),
         )
-    return attention_mask
+    return attention_mask.to(dtype=dtype)
 
 
 def flex_attention_forward(
